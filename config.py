@@ -2,21 +2,7 @@
 Configuration for the Vision Service.
 Handles screen / camera capture → Gemini 2.5 Flash analysis.
 """
-import os
-import sys
-
-# ── Path bootstrap ────────────────────────────────────────────────────────────
-_THIS_DIR    = os.path.dirname(os.path.abspath(__file__))
-_PARENT_DIR  = os.path.dirname(_THIS_DIR)
-_DESKTOP_DIR = os.path.join(_PARENT_DIR, "desktop_mon_gemini")
-
-for _p in (_DESKTOP_DIR, _PARENT_DIR):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Pull the API key from the shared api_keys.py in desktop_mon_gemini
-from api_keys import GEMINI_API_KEY  # noqa: E402  (after sys.path update)
+from api_keys import GEMINI_API_KEY
 
 API_KEY = GEMINI_API_KEY
 
