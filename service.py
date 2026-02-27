@@ -1,33 +1,18 @@
 """
-VisionService
-─────────────
-• Captures screen / camera frames
-• Sends frames + buffered audio-context to Gemini 2.5 Flash
-• Subscribes to Hub audio_context events (from mic & desktop audio services)
-  so Gemini always gets the combined picture + audio context
-• Broadcasts vision analysis results to:
-    - WebSocket clients on port 8015
-    - The central Hub (vision_context, text_update)
+VisionService — full verbose logging
 """
-
 import asyncio
 import threading
 import time
+import traceback
 from datetime import datetime
 
 import socketio
 
 from config import (
-    API_KEY,
-    CAPTURE_REGION,
-    DEBUG_MODE,
-    FPS,
-    HUB_URL,
-    IMAGE_QUALITY,
-    MAX_OUTPUT_TOKENS,
-    PROMPT,
-    SERVICE_NAME,
-    VIDEO_DEVICE_INDEX,
+    API_KEY, CAPTURE_REGION, DEBUG_MODE, FPS,
+    HUB_URL, IMAGE_QUALITY, MAX_OUTPUT_TOKENS,
+    PROMPT, SERVICE_NAME, VIDEO_DEVICE_INDEX,
 )
 from gemini_client import GeminiClient
 from screen_capture import ScreenCapture
@@ -35,14 +20,22 @@ from streaming_manager import StreamingManager
 from websocket_server import WebSocketServer
 
 
+def log(msg: str):
+    print(f"[{time.strftime('%H:%M:%S')}] [{SERVICE_NAME}] {msg}", flush=True)
+
+
 class VisionService:
     def __init__(self):
-        print(f"👁️  [{SERVICE_NAME}] Initializing …")
+        log("👁️  Initializing …")
+        self._shutting_down      = False
+        self._shutdown_lock      = threading.Lock()
+        self._hub_emit_count     = 0
+        self._ws_broadcast_count = 0
+        self._gemini_response_count = 0
+        self._audio_ctx_received = 0
 
-        self._shutting_down  = False
-        self._shutdown_lock  = threading.Lock()
-
-        # ── WebSocket broadcast server ────────────────────────────────────────
+        # ── WebSocket server ──────────────────────────────────────────────────
+        log("Creating WebSocket broadcast server …")
         self.ws_server = WebSocketServer()
 
         # ── Socket.IO hub client ──────────────────────────────────────────────
@@ -51,26 +44,37 @@ class VisionService:
         self._register_hub_events()
 
         # ── Screen capture ────────────────────────────────────────────────────
-        self.screen_capture = ScreenCapture(
-            image_quality=IMAGE_QUALITY,
-            video_index=VIDEO_DEVICE_INDEX,
-        )
-        if VIDEO_DEVICE_INDEX is None and CAPTURE_REGION:
-            self.screen_capture.set_capture_region(CAPTURE_REGION)
-
-        # ── Gemini response buffer ────────────────────────────────────────────
-        self._response_buffer      = ""
-        self._last_gemini_context  = ""
+        log(f"Initializing ScreenCapture (VIDEO_DEVICE_INDEX={VIDEO_DEVICE_INDEX}) …")
+        try:
+            self.screen_capture = ScreenCapture(
+                image_quality=IMAGE_QUALITY,
+                video_index=VIDEO_DEVICE_INDEX,
+            )
+            if VIDEO_DEVICE_INDEX is None and CAPTURE_REGION:
+                self.screen_capture.set_capture_region(CAPTURE_REGION)
+                log(f"Capture region set: {CAPTURE_REGION}")
+            log("✅ ScreenCapture ready")
+        except Exception as e:
+            log(f"❌ ScreenCapture init FAILED: {e}")
+            log(traceback.format_exc())
+            raise
 
         # ── Gemini client ─────────────────────────────────────────────────────
-        self.gemini_client = GeminiClient(
-            api_key           = API_KEY,
-            system_prompt     = PROMPT.replace("{audio_transcripts}", ""),
-            response_callback = self._on_gemini_response,
-            error_callback    = self._on_gemini_error,
-            max_output_tokens = MAX_OUTPUT_TOKENS,
-            debug_mode        = DEBUG_MODE,
-        )
+        log("Initializing GeminiClient …")
+        try:
+            self.gemini_client = GeminiClient(
+                api_key           = API_KEY,
+                system_prompt     = PROMPT.replace("{audio_transcripts}", ""),
+                response_callback = self._on_gemini_response,
+                error_callback    = self._on_gemini_error,
+                max_output_tokens = MAX_OUTPUT_TOKENS,
+                debug_mode        = DEBUG_MODE,
+            )
+            log("✅ GeminiClient ready")
+        except Exception as e:
+            log(f"❌ GeminiClient init FAILED: {e}")
+            log(traceback.format_exc())
+            raise
 
         # ── Streaming manager ─────────────────────────────────────────────────
         self.streaming_manager = StreamingManager(
@@ -81,25 +85,24 @@ class VisionService:
             debug_mode       = DEBUG_MODE,
         )
         self.streaming_manager.set_error_callback(self._on_streaming_error)
+        self._response_buffer = ""
 
-    # ── Public ───────────────────────────────────────────────────────────────
+        log("✅ VisionService initialized")
+
+    # ── Public ────────────────────────────────────────────────────────────────
 
     def run(self):
-        """Start all components; blocks until stop() is called."""
-        # Hub event-loop
         self.hub_loop = asyncio.new_event_loop()
-        threading.Thread(
-            target=self._hub_thread, args=(self.hub_loop,), daemon=True, name="VisionHub"
-        ).start()
+        threading.Thread(target=self._hub_thread, args=(self.hub_loop,), daemon=True, name="VisionHub").start()
+        log("Hub thread started")
 
-        # WebSocket server
         self.ws_server.start()
+        log("WebSocket server started")
 
-        # Brief pause to let hub connect, then verify Gemini + start streaming
         threading.Thread(target=self._delayed_start, daemon=True).start()
+        log("Delayed start thread launched …")
 
-        print(f"✅ [{SERVICE_NAME}] Running. Press Ctrl-C to stop.")
-
+        log("✅ Running — waiting for Gemini stream to begin …")
         try:
             while not self._shutting_down:
                 time.sleep(0.5)
@@ -111,43 +114,51 @@ class VisionService:
             if self._shutting_down:
                 return
             self._shutting_down = True
-
-        print(f"🛑 [{SERVICE_NAME}] Shutting down …")
-
+        log(f"🛑 Shutting down (hub emits: {self._hub_emit_count}, WS: {self._ws_broadcast_count}, Gemini responses: {self._gemini_response_count})")
         try:
             self.streaming_manager.stop_streaming()
-        except Exception:
-            pass
-
+        except Exception as e:
+            log(f"Error stopping stream manager: {e}")
         try:
             self.screen_capture.release()
-        except Exception:
-            pass
-
+        except Exception as e:
+            log(f"Error releasing screen capture: {e}")
         try:
             self.ws_server.stop()
-        except Exception:
-            pass
-
+        except Exception as e:
+            log(f"Error stopping WS server: {e}")
         if self.hub_loop:
             self.hub_loop.call_soon_threadsafe(self.hub_loop.stop)
+        log("🛑 Stopped.")
 
-        print(f"🛑 [{SERVICE_NAME}] Stopped.")
-
-    # ── Hub: connection + event registration ─────────────────────────────────
+    # ── Hub ───────────────────────────────────────────────────────────────────
 
     def _register_hub_events(self):
+        @self.sio.event
+        async def connect():
+            log(f"✅ Hub CONNECTED → {HUB_URL}")
+
+        @self.sio.event
+        async def disconnect():
+            log("⚠️  Hub DISCONNECTED")
+
+        @self.sio.event
+        async def connect_error(data):
+            log(f"❌ Hub CONNECTION ERROR: {data}")
+
         @self.sio.on("audio_context")
         async def on_audio_context(data):
-            """Feed incoming audio transcripts into the Gemini context buffer."""
+            self._audio_ctx_received += 1
             ctx = data.get("context", "")
+            src = data.get("metadata", {}).get("source", "audio")
+            log(f"📥 HUB audio_context #{self._audio_ctx_received} from [{src.upper()}]: {repr(ctx[:80])}")
             if ctx:
-                src = data.get("metadata", {}).get("source", "audio")
                 self.streaming_manager.add_transcript(f"[{src.upper()}]: {ctx}")
 
         @self.sio.on("spoken_word_context")
         async def on_spoken_word(data):
             ctx = data.get("context", "")
+            log(f"📥 HUB spoken_word_context: {repr(ctx[:80])}")
             if ctx:
                 self.streaming_manager.add_transcript(f"[MIC]: {ctx}")
 
@@ -160,69 +171,85 @@ class VisionService:
         while not self._shutting_down:
             if not self.sio.connected:
                 try:
+                    log(f"Attempting hub connect → {HUB_URL} …")
                     await self.sio.connect(HUB_URL)
-                    print(f"✅ [{SERVICE_NAME}] Hub connected: {HUB_URL}")
                 except Exception as e:
-                    print(f"⚠️  [{SERVICE_NAME}] Hub connect failed: {e}. Retrying …")
+                    log(f"⚠️  Hub connect failed: {e} — retry in 5s")
                     await asyncio.sleep(5)
             await asyncio.sleep(2)
 
     def _emit_to_hub(self, event: str, data: dict):
-        if self.sio.connected and self.hub_loop:
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self.sio.emit(event, data), self.hub_loop
-                )
-            except Exception as e:
-                print(f"❌ [{SERVICE_NAME}] Hub emit error: {e}")
+        if not self.sio.connected:
+            log(f"⚠️  SKIPPED hub emit (not connected): {event}")
+            return
+        if not self.hub_loop:
+            log(f"⚠️  SKIPPED hub emit (no loop): {event}")
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.sio.emit(event, data), self.hub_loop)
+            self._hub_emit_count += 1
+            log(f"→ HUB [{event}] {str(data)[:160]}")
+        except Exception as e:
+            log(f"❌ HUB EMIT ERROR [{event}]: {e}")
+            log(traceback.format_exc())
 
     # ── Gemini callbacks ──────────────────────────────────────────────────────
 
     def _on_gemini_response(self, text_chunk: str):
-        """Accumulate chunks; flush on sentence-ending punctuation."""
         self._response_buffer += text_chunk
-
         if self._response_buffer.strip().endswith((".", "!", "?", '"', "\n")):
             final_text = self._response_buffer.strip()
-            self._last_gemini_context = final_text
             self._response_buffer = ""
-
+            self._gemini_response_count += 1
             timestamp = datetime.now().isoformat()
+            log(f"🤖 GEMINI RESPONSE #{self._gemini_response_count}: {repr(final_text[:120])}")
 
-            # ── WebSocket clients ────────────────────────────────────────────
-            self.ws_server.broadcast({
-                "type":      "vision_analysis",
-                "content":   final_text,
-                "timestamp": timestamp,
-            })
+            # WebSocket broadcast
+            try:
+                self.ws_server.broadcast({
+                    "type":      "vision_analysis",
+                    "content":   final_text,
+                    "timestamp": timestamp,
+                })
+                self._ws_broadcast_count += 1
+                log(f"→ WS broadcast #{self._ws_broadcast_count} sent")
+            except Exception as e:
+                log(f"❌ WS BROADCAST ERROR: {e}")
+                log(traceback.format_exc())
 
-            # ── Hub ──────────────────────────────────────────────────────────
-            self._emit_to_hub("vision_context",  {"context": final_text})
-            self._emit_to_hub("text_update",     {"type": "text_update", "content": final_text})
-
-            print(f"👁️  [{SERVICE_NAME}] → {final_text[:120]}")
+            # Hub
+            self._emit_to_hub("vision_context", {"context": final_text})
+            self._emit_to_hub("text_update", {"type": "text_update", "content": final_text})
 
     def _on_gemini_error(self, msg: str):
-        print(f"❌ [{SERVICE_NAME}] Gemini error: {msg}")
+        log(f"❌ GEMINI ERROR: {msg}")
         self.ws_server.broadcast({"type": "error", "source": "gemini", "message": msg})
 
     def _on_streaming_error(self, msg: str):
-        print(f"❌ [{SERVICE_NAME}] Streaming error: {msg}")
+        log(f"❌ STREAMING ERROR: {msg}")
 
-    # ── Startup helpers ───────────────────────────────────────────────────────
+    # ── Startup ───────────────────────────────────────────────────────────────
 
     def _delayed_start(self):
-        """Test Gemini connection then kick off streaming."""
-        time.sleep(2)  # Give hub a moment to connect
+        time.sleep(2)
+        log("Testing capture source …")
         if not self.screen_capture.is_ready():
-            print(f"⚠️  [{SERVICE_NAME}] Capture source not ready. Check VIDEO_DEVICE_INDEX / CAPTURE_REGION.")
+            log(f"❌ Capture source NOT READY (VIDEO_DEVICE_INDEX={VIDEO_DEVICE_INDEX}, CAPTURE_REGION={CAPTURE_REGION})")
+            return
+        log("✅ Capture source ready")
+
+        log("Testing Gemini API connection …")
+        try:
+            ok, msg = self.gemini_client.test_connection()
+        except Exception as e:
+            log(f"❌ Gemini test threw exception: {e}")
+            log(traceback.format_exc())
             return
 
-        print(f"👁️  [{SERVICE_NAME}] Testing Gemini API …")
-        ok, msg = self.gemini_client.test_connection()
         if not ok:
-            print(f"❌ [{SERVICE_NAME}] Gemini API failed: {msg}")
+            log(f"❌ Gemini API FAILED: {msg}")
             return
 
-        print(f"✅ [{SERVICE_NAME}] Gemini OK. Starting stream at {FPS} FPS …")
+        log(f"✅ Gemini API OK: {msg} — starting stream at {FPS} FPS …")
         self.streaming_manager.start_streaming()
+        log("🎬 Streaming started")

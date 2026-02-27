@@ -2,7 +2,23 @@
 Configuration for the Vision Service.
 Handles screen / camera capture → Gemini 2.5 Flash analysis.
 """
-from api_keys import GEMINI_API_KEY
+import os
+import sys
+
+_THIS_DIR   = os.path.dirname(os.path.abspath(__file__))
+_PARENT_DIR = os.path.dirname(_THIS_DIR)
+for _p in (_THIS_DIR, _PARENT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+print(f"[config] sys.path[0:3] = {sys.path[:3]}", flush=True)
+
+try:
+    from api_keys import GEMINI_API_KEY
+    print("[config] ✅ api_keys (GEMINI_API_KEY) loaded", flush=True)
+except ImportError as e:
+    print(f"[config] ❌ api_keys FAILED: {e}", flush=True)
+    raise
 
 API_KEY = GEMINI_API_KEY
 
@@ -55,7 +71,5 @@ WEBSOCKET_PORT    = 8015
 HTTP_CONTROL_PORT = 8016
 HUB_URL           = "http://localhost:8002"
 
-# Microphone audio service WebSocket (for optional direct subscribe)
-MIC_WS_URL        = "ws://localhost:8013"
-
+MIC_WS_URL   = "ws://localhost:8013"
 SERVICE_NAME = "vision_service"
