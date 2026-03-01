@@ -218,8 +218,8 @@ class VisionService:
                 log(traceback.format_exc())
 
             # Hub
-            self._emit_to_hub("vision_context", {"context": final_text})
-            self._emit_to_hub("text_update", {"type": "text_update", "content": final_text})
+            self._emit_to_hub("vision_context", {"context": final_text, "timestamp": timestamp})
+            self._emit_to_hub("text_update", {"type": "text_update", "content": final_text, "timestamp": timestamp})
 
     def _on_gemini_error(self, msg: str):
         log(f"❌ GEMINI ERROR: {msg}")
