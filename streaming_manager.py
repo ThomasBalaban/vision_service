@@ -16,14 +16,14 @@ import time
 import traceback
 from collections import deque
 from datetime import datetime
+from config import FPS
 
-
-# How many frames to collect before sending
-BATCH_SIZE     = 6
-# How often (seconds) to fire the batch off to Gemini
+# Set the batch interval (e.g., fire off a request every 2 seconds)
 BATCH_INTERVAL = 2.0
-# How fast to capture frames into the buffer
-CAPTURE_FPS    = 3.0
+
+# Calculate target FPS and batch size dynamically based on the config
+CAPTURE_FPS    = float(FPS) 
+BATCH_SIZE     = int(CAPTURE_FPS * BATCH_INTERVAL) # 2 FPS * 2s = 4 frames
 
 
 class StreamingManager:

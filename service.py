@@ -84,6 +84,8 @@ class VisionService:
         self.streaming_manager = StreamingManager(
             screen_capture  = self.screen_capture,
             gemini_client   = self.gemini_client,
+            target_fps      = FPS, 
+            batch_size      = int(FPS * 2.0),
             debug_mode      = DEBUG_MODE,
         )
         self.streaming_manager.set_error_callback(self._on_streaming_error)
