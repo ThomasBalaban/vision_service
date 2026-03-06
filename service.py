@@ -1,5 +1,6 @@
 """
 VisionService — full verbose logging
+Stateless Gemini calls: 6 frames per batch, dispatched every 2 seconds.
 """
 import asyncio
 import threading
@@ -19,6 +20,9 @@ from screen_capture import ScreenCapture
 from streaming_manager import StreamingManager
 from websocket_server import WebSocketServer
 
+# Flush response buffer if it exceeds this many chars without hitting a sentence end
+_BUFFER_FLUSH_CHARS = 800
+
 
 def log(msg: str):
     print(f"[{time.strftime('%H:%M:%S')}] [{SERVICE_NAME}] {msg}", flush=True)
@@ -27,12 +31,12 @@ def log(msg: str):
 class VisionService:
     def __init__(self):
         log("👁️  Initializing …")
-        self._shutting_down      = False
-        self._shutdown_lock      = threading.Lock()
-        self._hub_emit_count     = 0
-        self._ws_broadcast_count = 0
+        self._shutting_down         = False
+        self._shutdown_lock         = threading.Lock()
+        self._hub_emit_count        = 0
+        self._ws_broadcast_count    = 0
         self._gemini_response_count = 0
-        self._audio_ctx_received = 0
+        self._audio_ctx_received    = 0
 
         # ── WebSocket server ──────────────────────────────────────────────────
         log("Creating WebSocket broadcast server …")
@@ -78,13 +82,12 @@ class VisionService:
 
         # ── Streaming manager ─────────────────────────────────────────────────
         self.streaming_manager = StreamingManager(
-            screen_capture   = self.screen_capture,
-            gemini_client    = self.gemini_client,
-            target_fps       = FPS,
-            restart_interval = 1500,
-            debug_mode       = DEBUG_MODE,
+            screen_capture  = self.screen_capture,
+            gemini_client   = self.gemini_client,
+            debug_mode      = DEBUG_MODE,
         )
         self.streaming_manager.set_error_callback(self._on_streaming_error)
+
         self._response_buffer = ""
 
         log("✅ VisionService initialized")
@@ -93,7 +96,10 @@ class VisionService:
 
     def run(self):
         self.hub_loop = asyncio.new_event_loop()
-        threading.Thread(target=self._hub_thread, args=(self.hub_loop,), daemon=True, name="VisionHub").start()
+        threading.Thread(
+            target=self._hub_thread, args=(self.hub_loop,),
+            daemon=True, name="VisionHub",
+        ).start()
         log("Hub thread started")
 
         self.ws_server.start()
@@ -114,7 +120,9 @@ class VisionService:
             if self._shutting_down:
                 return
             self._shutting_down = True
-        log(f"🛑 Shutting down (hub emits: {self._hub_emit_count}, WS: {self._ws_broadcast_count}, Gemini responses: {self._gemini_response_count})")
+        log(f"🛑 Shutting down (hub emits: {self._hub_emit_count}, "
+            f"WS: {self._ws_broadcast_count}, "
+            f"Gemini responses: {self._gemini_response_count})")
         try:
             self.streaming_manager.stop_streaming()
         except Exception as e:
@@ -127,6 +135,12 @@ class VisionService:
             self.ws_server.stop()
         except Exception as e:
             log(f"Error stopping WS server: {e}")
+        if self.hub_loop and self.sio.connected:
+            try:
+                asyncio.run_coroutine_threadsafe(self.sio.disconnect(), self.hub_loop)
+                time.sleep(0.5)
+            except Exception as e:
+                log(f"Error disconnecting hub: {e}")
         if self.hub_loop:
             self.hub_loop.call_soon_threadsafe(self.hub_loop.stop)
         log("🛑 Stopped.")
@@ -151,7 +165,8 @@ class VisionService:
             self._audio_ctx_received += 1
             ctx = data.get("context", "")
             src = data.get("metadata", {}).get("source", "audio")
-            log(f"📥 HUB audio_context #{self._audio_ctx_received} from [{src.upper()}]: {repr(ctx[:80])}")
+            log(f"📥 HUB audio_context #{self._audio_ctx_received} "
+                f"from [{src.upper()}]: {repr(ctx[:80])}")
             if ctx:
                 self.streaming_manager.add_transcript(f"[{src.upper()}]: {ctx}")
 
@@ -197,29 +212,54 @@ class VisionService:
 
     def _on_gemini_response(self, text_chunk: str):
         self._response_buffer += text_chunk
-        if self._response_buffer.strip().endswith((".", "!", "?", '"', "\n")):
-            final_text = self._response_buffer.strip()
+
+        stripped = self._response_buffer.strip()
+
+        # Only flush on a genuine sentence boundary:
+        #   - plain end:             ...word.  ...word!  ...word?
+        #   - sentence inside quote: ..."word."  ..."word!"  ..."word?"
+        #   - newline
+        # A bare " mid-sentence (opening quote) no longer triggers a flush.
+        at_sentence_end = (
+            stripped.endswith((".", "!", "?"))
+            or stripped.endswith(('."', '!"', '?"'))
+            or stripped.endswith("\n")
+        )
+        buffer_overflowed = len(self._response_buffer) > _BUFFER_FLUSH_CHARS
+
+        if not (at_sentence_end or buffer_overflowed):
+            return
+
+        final_text = stripped
+        if not final_text:
             self._response_buffer = ""
-            self._gemini_response_count += 1
-            timestamp = datetime.now().isoformat()
-            log(f"🤖 GEMINI RESPONSE #{self._gemini_response_count}: {repr(final_text[:120])}")
+            return
 
-            # WebSocket broadcast
-            try:
-                self.ws_server.broadcast({
-                    "type":      "vision_analysis",
-                    "content":   final_text,
-                    "timestamp": timestamp,
-                })
-                self._ws_broadcast_count += 1
-                log(f"→ WS broadcast #{self._ws_broadcast_count} sent")
-            except Exception as e:
-                log(f"❌ WS BROADCAST ERROR: {e}")
-                log(traceback.format_exc())
+        self._response_buffer = ""
+        self._gemini_response_count += 1
+        timestamp = datetime.now().isoformat()
 
-            # Hub
-            self._emit_to_hub("vision_context", {"context": final_text, "timestamp": timestamp})
-            self._emit_to_hub("text_update", {"type": "text_update", "content": final_text, "timestamp": timestamp})
+        if buffer_overflowed and not at_sentence_end:
+            log(f"⚠️  Buffer force-flushed at {len(final_text)} chars (no sentence end found)")
+
+        log(f"🤖 GEMINI RESPONSE #{self._gemini_response_count}: {repr(final_text[:120])}")
+
+        # WebSocket broadcast
+        try:
+            self.ws_server.broadcast({
+                "type":      "vision_analysis",
+                "content":   final_text,
+                "timestamp": timestamp,
+            })
+            self._ws_broadcast_count += 1
+            log(f"→ WS broadcast #{self._ws_broadcast_count} sent")
+        except Exception as e:
+            log(f"❌ WS BROADCAST ERROR: {e}")
+            log(traceback.format_exc())
+
+        # Hub
+        self._emit_to_hub("vision_context", {"context": final_text, "timestamp": timestamp})
+        self._emit_to_hub("text_update",    {"type": "text_update", "content": final_text, "timestamp": timestamp})
 
     def _on_gemini_error(self, msg: str):
         log(f"❌ GEMINI ERROR: {msg}")
@@ -234,7 +274,8 @@ class VisionService:
         time.sleep(2)
         log("Testing capture source …")
         if not self.screen_capture.is_ready():
-            log(f"❌ Capture source NOT READY (VIDEO_DEVICE_INDEX={VIDEO_DEVICE_INDEX}, CAPTURE_REGION={CAPTURE_REGION})")
+            log(f"❌ Capture source NOT READY "
+                f"(VIDEO_DEVICE_INDEX={VIDEO_DEVICE_INDEX}, CAPTURE_REGION={CAPTURE_REGION})")
             return
         log("✅ Capture source ready")
 
@@ -250,6 +291,6 @@ class VisionService:
             log(f"❌ Gemini API FAILED: {msg}")
             return
 
-        log(f"✅ Gemini API OK: {msg} — starting stream at {FPS} FPS …")
+        log(f"✅ Gemini API OK: {msg} — starting stream …")
         self.streaming_manager.start_streaming()
         log("🎬 Streaming started")

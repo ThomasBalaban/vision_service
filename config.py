@@ -53,7 +53,8 @@ ANALYSIS RULES:
 1. MATCH AUDIO TO VISUALS: When you see a character and hear dialogue, connect them.
 2. IDENTIFY SPEAKERS: Use visual cues to name or describe who is speaking.
 3. AUDIO TYPES: Distinguish character dialogue, background music, and sound effects.
-4. KEEP IT CONCISE: One short paragraph. Under 100 words.
+4. KEEP IT CONCISE: One short paragraph. Under 250 words.
+5. If no audio transcript is provided, do not mention the absence of audio — just describe the visuals.
 
 OUTPUT FORMAT:
 Natural paragraph combining visuals + audio. Include speakers, what was said, and notable audio.

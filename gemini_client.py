@@ -1,7 +1,7 @@
 """
 GeminiClient for the Vision Service.
-Wraps google-genai chat API with streaming support.
-Stateful chat session — call reset_chat() to clear history.
+Stateless single calls — no chat history, no context growth.
+Accepts a batch of frames (up to 6) per request for temporal awareness.
 """
 
 import io
@@ -36,27 +36,12 @@ class GeminiClient:
         self._is_processing = False
         self._lock          = threading.Lock()
 
-        self._init_chat()
-
-    def _init_chat(self):
-        try:
-            self.chat = self.client.chats.create(
-                model=self.model_name,
-                config=types.GenerateContentConfig(
-                    system_instruction=self.system_prompt,
-                    temperature=0.7,
-                    max_output_tokens=self.max_output_tokens,
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                    ],
-                ),
-            )
-        except Exception as e:
-            if self.error_callback:
-                self.error_callback(f"Failed to init chat: {e}")
+        self._safety_settings = [
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT",        threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+        ]
 
     def test_connection(self):
         try:
@@ -70,35 +55,67 @@ class GeminiClient:
         except Exception as e:
             return False, str(e)
 
-    def send_message(self, frame, text_prompt: str | None = None):
-        if self._is_processing:
-            if self.debug_mode:
-                print("[Gemini] Skipped frame (API busy)")
-            return
+    def send_frames(self, frames: list, text_prompt: str | None = None):
+        """
+        Send a batch of frames as a single stateless request.
+        frames: list of PIL.Image or numpy arrays (up to 6).
+        Skips if a request is already in flight.
+        """
+        with self._lock:
+            if self._is_processing:
+                if self.debug_mode:
+                    print(f"[Gemini] Skipped batch of {len(frames)} frames (API busy)")
+                return
+            self._is_processing = True
+
         threading.Thread(
-            target=self._process_request, args=(frame, text_prompt), daemon=True
+            target=self._process_request,
+            args=(frames, text_prompt),
+            daemon=True,
         ).start()
 
-    def _process_request(self, frame, text_prompt: str | None):
-        with self._lock:
-            self._is_processing = True
+    def _frame_to_jpeg_bytes(self, frame) -> bytes:
+        if hasattr(frame, "shape"):
+            # numpy / cv2 frame
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(rgb)
+        else:
+            pil_image = frame
+
+        # Resize to max 512px on longest side — cuts token cost vs 800px
+        max_size = 512
+        if pil_image.width > max_size or pil_image.height > max_size:
+            pil_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+        buf = io.BytesIO()
+        pil_image.save(buf, format="JPEG", quality=75)
+        return buf.getvalue()
+
+    def _process_request(self, frames: list, text_prompt: str | None):
         try:
-            # Convert frame to JPEG bytes
-            if hasattr(frame, "shape"):
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                pil_image = Image.fromarray(rgb)
-            else:
-                pil_image = frame
+            parts = []
 
-            buf = io.BytesIO()
-            pil_image.save(buf, format="JPEG", quality=80)
-            img_bytes = buf.getvalue()
+            for i, frame in enumerate(frames):
+                img_bytes = self._frame_to_jpeg_bytes(frame)
+                parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+                if self.debug_mode:
+                    print(f"[Gemini] Frame {i+1}/{len(frames)} encoded ({len(img_bytes)} bytes)")
 
-            parts = [types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg")]
             if text_prompt:
                 parts.append(types.Part.from_text(text=text_prompt))
 
-            response_stream = self.chat.send_message_stream(message=parts)
+            # Stateless — no chat session, no growing history, flat token cost every call
+            response_stream = self.client.models.generate_content_stream(
+                model=self.model_name,
+                contents=[types.Content(role="user", parts=parts)],
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_prompt,
+                    temperature=0.7,
+                    max_output_tokens=self.max_output_tokens,
+                    safety_settings=self._safety_settings,
+                ),
+            )
+
             for chunk in response_stream:
                 if chunk.text and self.response_callback:
                     self.response_callback(chunk.text)
@@ -110,8 +127,3 @@ class GeminiClient:
         finally:
             with self._lock:
                 self._is_processing = False
-
-    def reset_chat(self):
-        self._init_chat()
-        if self.debug_mode:
-            print("[Gemini] Chat history reset.")

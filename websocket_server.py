@@ -9,11 +9,14 @@ import websockets
 
 from config import WEBSOCKET_PORT
 
+_QUEUE_MAXSIZE = 100
+
 
 class WebSocketServer:
     def __init__(self):
         self.connected_clients: set = set()
-        self.message_queue: queue.Queue = queue.Queue()
+        # Bounded queue — drops oldest when full so memory can't grow unbounded
+        self.message_queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAXSIZE)
         self.loop: asyncio.AbstractEventLoop | None = None
         self.running = True
 
@@ -28,10 +31,15 @@ class WebSocketServer:
             self.loop.call_soon_threadsafe(self.loop.stop)
 
     def broadcast(self, data: dict):
+        # Drop oldest message to make room rather than silently discarding newest
         try:
             self.message_queue.put_nowait(data)
         except queue.Full:
-            pass
+            try:
+                self.message_queue.get_nowait()
+                self.message_queue.put_nowait(data)
+            except Exception:
+                pass
 
     def _run_in_thread(self):
         self.loop = asyncio.new_event_loop()
@@ -42,8 +50,8 @@ class WebSocketServer:
             self.loop.close()
 
     async def _serve(self):
-        asyncio.create_task(self._queue_processor())
-        asyncio.create_task(self._heartbeat())
+        asyncio.ensure_future(self._queue_processor())
+        asyncio.ensure_future(self._heartbeat())
         async with websockets.serve(self._handler, "0.0.0.0", WEBSOCKET_PORT):
             await asyncio.Future()
 
@@ -52,8 +60,8 @@ class WebSocketServer:
         print(f"🔌 [VisionWS] Client connected (total: {len(self.connected_clients)})")
         try:
             await ws.send(json.dumps({
-                "type": "connection_established",
-                "service": "vision_service",
+                "type":      "connection_established",
+                "service":   "vision_service",
                 "timestamp": time.time(),
             }))
             async for msg in ws:
@@ -67,6 +75,7 @@ class WebSocketServer:
             pass
         finally:
             self.connected_clients.discard(ws)
+            print(f"🔌 [VisionWS] Client disconnected (total: {len(self.connected_clients)})")
 
     async def _queue_processor(self):
         while self.running:
