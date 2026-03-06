@@ -1,11 +1,16 @@
 """
 GeminiClient for the Vision Service.
 Stateless single calls — no chat history, no context growth.
-Accepts a batch of frames (up to 6) per request for temporal awareness.
+
+Each call receives:
+  - Up to 6 video frames
+  - Ambient audio (always, for music/SFX detection)
+  - Speech audio (optional, only when VAD has a complete utterance)
 """
 
 import io
 import threading
+import wave
 
 import cv2
 from google import genai
@@ -20,7 +25,7 @@ class GeminiClient:
         system_prompt: str,
         response_callback,
         error_callback,
-        max_output_tokens: int = 600,
+        max_output_tokens: int = 800,
         debug_mode: bool = False,
     ):
         self.api_key           = api_key
@@ -55,10 +60,21 @@ class GeminiClient:
         except Exception as e:
             return False, str(e)
 
-    def send_frames(self, frames: list, text_prompt: str | None = None):
+    def send_frames(
+        self,
+        frames: list,
+        ambient_audio: bytes | None = None,
+        speech_audio: bytes | None = None,
+        sample_rate: int = 16000,
+    ):
         """
-        Send a batch of frames as a single stateless request.
-        frames: list of PIL.Image or numpy arrays (up to 6).
+        Send a batch of frames + audio as a single stateless request.
+
+        ambient_audio: raw int16 PCM bytes — always sent when available,
+                       Gemini uses for music/SFX detection.
+        speech_audio:  raw int16 PCM bytes — only sent when VAD has a
+                       complete utterance, Gemini uses for transcription.
+
         Skips if a request is already in flight.
         """
         with self._lock:
@@ -70,19 +86,17 @@ class GeminiClient:
 
         threading.Thread(
             target=self._process_request,
-            args=(frames, text_prompt),
+            args=(frames, ambient_audio, speech_audio, sample_rate),
             daemon=True,
         ).start()
 
     def _frame_to_jpeg_bytes(self, frame) -> bytes:
         if hasattr(frame, "shape"):
-            # numpy / cv2 frame
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(rgb)
         else:
             pil_image = frame
 
-        # Resize to max 512px on longest side — cuts token cost vs 800px
         max_size = 512
         if pil_image.width > max_size or pil_image.height > max_size:
             pil_image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
@@ -91,20 +105,54 @@ class GeminiClient:
         pil_image.save(buf, format="JPEG", quality=75)
         return buf.getvalue()
 
-    def _process_request(self, frames: list, text_prompt: str | None):
+    def _pcm_to_wav(self, pcm_bytes: bytes, sample_rate: int) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)          # int16 = 2 bytes
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm_bytes)
+        return buf.getvalue()
+
+    def _process_request(
+        self,
+        frames: list,
+        ambient_audio: bytes | None,
+        speech_audio: bytes | None,
+        sample_rate: int,
+    ):
         try:
             parts = []
 
+            # 1. Video frames
             for i, frame in enumerate(frames):
                 img_bytes = self._frame_to_jpeg_bytes(frame)
                 parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
                 if self.debug_mode:
-                    print(f"[Gemini] Frame {i+1}/{len(frames)} encoded ({len(img_bytes)} bytes)")
+                    print(f"[Gemini] Frame {i+1}/{len(frames)} ({len(img_bytes)} bytes)")
 
-            if text_prompt:
-                parts.append(types.Part.from_text(text=text_prompt))
+            # 2. Ambient audio (always present when capture is running)
+            if ambient_audio:
+                wav = self._pcm_to_wav(ambient_audio, sample_rate)
+                parts.append(types.Part.from_bytes(data=wav, mime_type="audio/wav"))
+                parts.append(types.Part.from_text(
+                    text="The above audio is the AMBIENT background audio clip."
+                ))
+                if self.debug_mode:
+                    print(f"[Gemini] Ambient audio: {len(wav)} bytes WAV")
 
-            # Stateless — no chat session, no growing history, flat token cost every call
+            # 3. Speech audio (only when VAD detected a complete utterance)
+            if speech_audio:
+                wav = self._pcm_to_wav(speech_audio, sample_rate)
+                parts.append(types.Part.from_bytes(data=wav, mime_type="audio/wav"))
+                parts.append(types.Part.from_text(
+                    text="The above audio is the SPEECH clip — an isolated utterance "
+                         "detected by voice activity detection. Transcribe it accurately."
+                ))
+                if self.debug_mode:
+                    print(f"[Gemini] Speech audio: {len(wav)} bytes WAV")
+
+            # Stateless call
             response_stream = self.client.models.generate_content_stream(
                 model=self.model_name,
                 contents=[types.Content(role="user", parts=parts)],

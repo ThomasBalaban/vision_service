@@ -1,6 +1,7 @@
 """
 Configuration for the Vision Service.
-Handles screen / camera capture → Gemini 2.5 Flash analysis.
+Handles screen/camera capture + desktop audio → Gemini 2.5 Flash.
+Outputs scene analysis on port 8015 and audio/transcript on port 8017.
 """
 import os
 import sys
@@ -22,17 +23,53 @@ except ImportError as e:
 
 API_KEY = GEMINI_API_KEY
 
-# Vision
+# ── Vision ────────────────────────────────────────────────────────────────────
 VIDEO_DEVICE_INDEX = 1          # Set to None to use screen-region capture
-FPS                = 2
 IMAGE_QUALITY      = 85
-MAX_OUTPUT_TOKENS  = 600
+MAX_OUTPUT_TOKENS  = 800
 
 CAPTURE_REGION = {
     "left": 14, "top": 154,
     "width": 1222, "height": 685,
 }
 
+# ── Audio capture ─────────────────────────────────────────────────────────────
+_PREFERRED_DEVICE_NAME = "Cam Link 4K"
+_FALLBACK_DEVICE_ID    = 4
+
+def _find_device_by_name(name: str) -> int | None:
+    try:
+        import sounddevice as sd
+        for i, dev in enumerate(sd.query_devices()):
+            if dev["max_input_channels"] > 0 and name.lower() in dev["name"].lower():
+                print(f"[config] ✅ Found audio device '{name}' → id={i} ({dev['name']})", flush=True)
+                return i
+    except Exception as e:
+        print(f"[config] ⚠️  Audio device lookup failed: {e}", flush=True)
+    return None
+
+_detected = _find_device_by_name(_PREFERRED_DEVICE_NAME)
+if _detected is None:
+    print(f"[config] ⚠️  '{_PREFERRED_DEVICE_NAME}' not found — falling back to device_id={_FALLBACK_DEVICE_ID}", flush=True)
+DESKTOP_AUDIO_DEVICE_ID = _detected if _detected is not None else _FALLBACK_DEVICE_ID
+
+AUDIO_SAMPLE_RATE = 16000   # Target rate (resampled to this)
+AUDIO_GAIN        = 1.5     # Pre-send gain
+# How many seconds of ambient audio to always send for music/SFX detection
+AMBIENT_WINDOW_S  = 2.0
+
+# ── VAD ───────────────────────────────────────────────────────────────────────
+VAD_AGGRESSIVENESS      = 2     # webrtcvad mode 0-3 (3 = most aggressive filtering)
+VAD_FRAME_MS            = 30    # Frame duration in ms (10, 20, or 30)
+VAD_SILENCE_DURATION_MS = 600   # Silence this long closes an utterance
+VAD_MAX_UTTERANCE_S     = 8.0   # Force-close utterance after this long regardless
+
+# ── Streaming ─────────────────────────────────────────────────────────────────
+FPS            = 3      # Frame capture rate
+BATCH_SIZE     = 6      # Frames per Gemini call
+BATCH_INTERVAL = 2.0    # Seconds between Gemini dispatch ticks
+
+# ── Safety ────────────────────────────────────────────────────────────────────
 SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
@@ -40,37 +77,50 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-PROMPT = """You are an expert scene analyzer providing real-time context for an AI assistant. \
-You receive both video frames and audio transcriptions from the screen.
+# ── Prompt ────────────────────────────────────────────────────────────────────
+# Gemini receives:
+#   - 6 video frames
+#   - Ambient audio clip (always present) — background sound, music, SFX
+#   - Speech audio clip (only when VAD detected a complete utterance)
+#
+# Respond in exactly three tagged sections.
+PROMPT = """You are an expert scene and audio analyzer for a live stream AI companion.
 
-YOUR JOB: Combine what you SEE and what you HEAR into a unified description of what's happening on screen.
+You receive:
+  1. A sequence of video frames showing the current scene.
+  2. An AMBIENT audio clip (always present) — this is the raw background audio
+     captured from the stream, containing music, sound effects, and game audio.
+  3. A SPEECH audio clip (only sometimes present) — this is an isolated segment
+     of detected speech, cleanly captured with silence at both ends.
 
-AUDIO TRANSCRIPTS (from the last few seconds):
-{audio_transcripts}
+Respond using EXACTLY this format — no text outside the tags:
 
-ANALYSIS RULES:
+[SCENE]
+One concise paragraph: who is on screen, what is happening, what game or content
+is shown. Under 80 words.
+[/SCENE]
 
-1. MATCH AUDIO TO VISUALS: When you see a character and hear dialogue, connect them.
-2. IDENTIFY SPEAKERS: Use visual cues to name or describe who is speaking.
-3. AUDIO TYPES: Distinguish character dialogue, background music, and sound effects.
-4. KEEP IT CONCISE: One short paragraph. Under 250 words.
-5. If no audio transcript is provided, do not mention the absence of audio — just describe the visuals.
+[SPEECH]
+If a speech audio clip was provided: transcribe it accurately. Attribute to the
+speaker if they are visible on screen (use their name or a consistent label like
+"Male Streamer"). One speaker per line. Preserve natural speech including filler
+words if clearly audible.
+If no speech clip was provided, write: none
+[/SPEECH]
 
-OUTPUT FORMAT:
-Natural paragraph combining visuals + audio. Include speakers, what was said, and notable audio.
+[AUDIO]
+Describe what you hear in the ambient audio clip. Be specific and useful:
+- Music: genre, mood, tempo (e.g. "tense orchestral combat music", "upbeat chiptune")
+- Sound effects: what they are (e.g. "sword clashing SFX", "explosion", "UI click sounds")
+- Game audio: describe notable in-game sounds
+- If the ambient audio is silent or only low background hiss, write: none
+[/AUDIO]"""
 
-EXAMPLE:
-"Charlie (blonde girl in white dress) is singing 'Inside of every demon is a rainbow!' while \
-Vaggie stands behind her looking skeptical. Upbeat piano music playing."
-
-NOW ANALYZE THE CURRENT SCENE:"""
-
-DEBUG_MODE = False
-
-# Network
-WEBSOCKET_PORT    = 8015
+# ── Network ───────────────────────────────────────────────────────────────────
+VISION_WS_PORT    = 8015    # Scene analysis (vision consumers unchanged)
+AUDIO_WS_PORT     = 8017    # Transcript + audio events (replaces stream_audio_service)
 HTTP_CONTROL_PORT = 8016
 HUB_URL           = "http://localhost:8002"
 
-MIC_WS_URL   = "ws://localhost:8013"
 SERVICE_NAME = "vision_service"
+DEBUG_MODE   = False

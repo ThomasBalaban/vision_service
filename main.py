@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Vision Service — Entry Point
-=============================
-Captures screen / camera → Gemini 2.5 Flash analysis → broadcasts results.
+Vision Service — Entry Point (merged vision + audio)
+=====================================================
+Captures screen/camera + desktop audio → Gemini 2.5 Flash → dual WebSocket output.
 
-Subscribes to Hub audio_context events so Gemini receives the full
-picture + audio context from microphone_audio_service and stream_audio_service.
-
-WebSocket clients:  ws://localhost:8015
-Health check:       GET  http://localhost:8016/health
-Shutdown:           POST http://localhost:8016/shutdown
+Scene analysis:    ws://localhost:8015
+Audio/transcript:  ws://localhost:8017
+Health check:      GET  http://localhost:8016/health
+Shutdown:          POST http://localhost:8016/shutdown
 """
 
 import os
@@ -39,7 +37,7 @@ def main():
     http_control.start(shutdown_callback=_shutdown)
 
     signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGINT,  _shutdown)
 
     _service.run()
 
