@@ -41,27 +41,20 @@ SAFETY_SETTINGS = [
 ]
 
 PROMPT = """You are an expert scene analyzer providing real-time context for an AI assistant. \
-You receive both video frames and audio transcriptions from the screen.
+You receive both video frames and a short audio clip of the current scene.
 
-YOUR JOB: Combine what you SEE and what you HEAR into a unified description of what's happening on screen.
-
-AUDIO TRANSCRIPTS (from the last few seconds):
-{audio_transcripts}
+YOUR JOB: Combine what you SEE and what you HEAR into a unified description of what's happening.
 
 ANALYSIS RULES:
-
-1. MATCH AUDIO TO VISUALS: When you see a character and hear dialogue, connect them.
-2. IDENTIFY SPEAKERS: Use visual cues to name or describe who is speaking.
-3. AUDIO TYPES: Distinguish character dialogue, background music, and sound effects.
-4. KEEP IT CONCISE: One short paragraph. Under 250 words.
-5. If no audio transcript is provided, do not mention the absence of audio — just describe the visuals.
+1. MATCH AUDIO TO VISUALS: If you hear a sound effect (e.g., explosion, jump, notification) or background music, describe it in relation to what is happening on screen.
+2. DO NOT TRANSCRIBE: Focus on the mood, sound effects, and the tone of any voices, rather than writing out exactly what is being said.
+3. KEEP IT CONCISE: One short paragraph. Under 250 words.
 
 OUTPUT FORMAT:
-Natural paragraph combining visuals + audio. Include speakers, what was said, and notable audio.
+Natural paragraph combining visuals + notable audio. 
 
 EXAMPLE:
-"Charlie (blonde girl in white dress) is singing 'Inside of every demon is a rainbow!' while \
-Vaggie stands behind her looking skeptical. Upbeat piano music playing."
+"A character in a red suit jumps over a gap while an upbeat, fast-paced electronic track plays. A loud crashing sound effect is heard as the platform behind them collapses."
 
 NOW ANALYZE THE CURRENT SCENE:"""
 

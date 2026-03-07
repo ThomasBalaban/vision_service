@@ -1,7 +1,7 @@
 """
 GeminiClient for the Vision Service.
 Stateless single calls — no chat history, no context growth.
-Accepts a batch of frames (up to 6) per request for temporal awareness.
+Accepts a batch of frames (up to 6) and raw audio per request for temporal awareness.
 """
 
 import io
@@ -55,10 +55,11 @@ class GeminiClient:
         except Exception as e:
             return False, str(e)
 
-    def send_frames(self, frames: list, text_prompt: str | None = None):
+    def send_frames(self, frames: list, text_prompt: str | None = None, audio_bytes: bytes | None = None):
         """
-        Send a batch of frames as a single stateless request.
+        Send a batch of frames and audio as a single stateless request.
         frames: list of PIL.Image or numpy arrays (up to 6).
+        audio_bytes: raw WAV file bytes.
         Skips if a request is already in flight.
         """
         with self._lock:
@@ -70,7 +71,7 @@ class GeminiClient:
 
         threading.Thread(
             target=self._process_request,
-            args=(frames, text_prompt),
+            args=(frames, text_prompt, audio_bytes),
             daemon=True,
         ).start()
 
@@ -91,16 +92,24 @@ class GeminiClient:
         pil_image.save(buf, format="JPEG", quality=75)
         return buf.getvalue()
 
-    def _process_request(self, frames: list, text_prompt: str | None):
+    def _process_request(self, frames: list, text_prompt: str | None, audio_bytes: bytes | None):
         try:
             parts = []
 
+            # 1. Attach Visuals
             for i, frame in enumerate(frames):
                 img_bytes = self._frame_to_jpeg_bytes(frame)
                 parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
                 if self.debug_mode:
                     print(f"[Gemini] Frame {i+1}/{len(frames)} encoded ({len(img_bytes)} bytes)")
 
+            # 2. Attach Raw Audio
+            if audio_bytes:
+                parts.append(types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"))
+                if self.debug_mode:
+                    print(f"[Gemini] Audio context attached ({len(audio_bytes)} bytes)")
+
+            # 3. Attach Text Prompt (if any)
             if text_prompt:
                 parts.append(types.Part.from_text(text=text_prompt))
 

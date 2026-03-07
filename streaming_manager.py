@@ -2,13 +2,8 @@
 StreamingManager for the Vision Service.
 
 Two-thread design:
-  - Capture thread: grabs frames at CAPTURE_FPS (default 3), stores in a
-    rolling buffer capped at BATCH_SIZE (default 6).
-  - Dispatch thread: every BATCH_INTERVAL seconds (default 2), takes the
-    buffered frames and fires a single stateless Gemini request.
-
-This means one API call per 2 seconds containing up to 6 frames, giving
-Gemini temporal context while keeping token usage flat and predictable.
+  - Capture thread: grabs frames at CAPTURE_FPS, stores in a rolling buffer.
+  - Dispatch thread: grabs buffered frames + raw WAV audio and fires a stateless Gemini request.
 """
 
 import threading
@@ -16,14 +11,15 @@ import time
 import traceback
 from collections import deque
 from datetime import datetime
-from config import FPS
 
-# Set the batch interval (e.g., fire off a request every 2 seconds)
+from audio_capture import AudioCapture
+
+# How many frames to collect before sending
+BATCH_SIZE     = 6
+# How often (seconds) to fire the batch off to Gemini
 BATCH_INTERVAL = 2.0
-
-# Calculate target FPS and batch size dynamically based on the config
-CAPTURE_FPS    = float(FPS) 
-BATCH_SIZE     = int(CAPTURE_FPS * BATCH_INTERVAL) # 2 FPS * 2s = 4 frames
+# How fast to capture frames into the buffer
+CAPTURE_FPS    = 3.0
 
 
 class StreamingManager:
@@ -34,7 +30,7 @@ class StreamingManager:
         target_fps: float = CAPTURE_FPS,
         batch_size: int = BATCH_SIZE,
         batch_interval: float = BATCH_INTERVAL,
-        restart_interval: int = 0,      # kept for API compat, unused (stateless now)
+        restart_interval: int = 0,
         debug_mode: bool = False,
     ):
         self.screen_capture  = screen_capture
@@ -52,34 +48,30 @@ class StreamingManager:
         self._capture_thread: threading.Thread | None = None
         self._dispatch_thread: threading.Thread | None = None
 
-        # Rolling frame buffer — only keeps the most recent `batch_size` frames
+        # Rolling frame buffer
         self._frame_buffer: deque = deque(maxlen=batch_size)
         self._frame_lock = threading.Lock()
 
-        # Audio transcript buffer
-        self.transcript_buffer: list[str] = []
-        self._transcript_lock = threading.Lock()
+        # Raw audio rolling buffer
+        self.audio_capture = AudioCapture(duration=int(batch_interval))
 
         # Callbacks
         self.status_callback  = None
         self.error_callback   = None
-        self.restart_callback = None  # kept for API compat, unused (stateless)
+        self.restart_callback = None
 
     # ── Callbacks ─────────────────────────────────────────────────────────
 
     def set_status_callback(self, cb):    self.status_callback  = cb
     def set_error_callback(self, cb):     self.error_callback   = cb
-    def set_restart_callback(self, cb):   self.restart_callback = cb  # no-op now
+    def set_restart_callback(self, cb):   self.restart_callback = cb
 
-    # ── Transcript feed ───────────────────────────────────────────────────
+    # ── Transcript feed (Legacy/No-op to prevent service.py crashes) ──────
 
     def add_transcript(self, text: str):
-        with self._transcript_lock:
-            ts    = datetime.now().strftime("%H:%M:%S")
-            entry = f"[{ts}] {text}"
-            self.transcript_buffer.append(entry)
-            if self.debug_mode:
-                print(f"[StreamMgr] Buffered transcript: {entry}")
+        # We are now using raw audio bytes instead of text transcripts from the Hub.
+        # This is intentionally left blank so the Socket.IO event handler doesn't crash.
+        pass
 
     # ── Control ───────────────────────────────────────────────────────────
 
@@ -90,6 +82,9 @@ class StreamingManager:
               f"dispatch every {self.batch_interval}s, batch size {self.batch_size}")
         self.streaming_active = True
         self.stop_event.clear()
+
+        # Start audio recording
+        self.audio_capture.start()
 
         self._capture_thread = threading.Thread(
             target=self._capture_loop, daemon=True, name="VisionCapture"
@@ -106,6 +101,9 @@ class StreamingManager:
         print("[StreamMgr] Stopping …")
         self.streaming_active = False
         self.stop_event.set()
+        
+        self.audio_capture.stop()
+        
         if self._capture_thread:
             self._capture_thread.join(timeout=2)
         if self._dispatch_thread:
@@ -143,12 +141,10 @@ class StreamingManager:
 
     def _dispatch_loop(self):
         while self.streaming_active and not self.stop_event.is_set():
-            # Wait for the batch interval
             self.stop_event.wait(timeout=self.batch_interval)
             if not self.streaming_active:
                 break
 
-            # Grab current frames
             with self._frame_lock:
                 frames = list(self._frame_buffer)
                 self._frame_buffer.clear()
@@ -158,21 +154,16 @@ class StreamingManager:
                     print("[StreamMgr] Dispatch tick — no frames, skipping")
                 continue
 
-            # Grab and clear audio transcripts
-            with self._transcript_lock:
-                transcripts     = list(self.transcript_buffer)
-                self.transcript_buffer.clear()
-
-            text_part = None
-            if transcripts:
-                text_part = "RECENT AUDIO LOGS:\n" + "\n".join(transcripts)
+            # Grab the raw WAV bytes from the audio capture buffer
+            audio_bytes = self.audio_capture.get_recent_wav_bytes()
 
             self.batch_count += 1
             print(f"[StreamMgr] Dispatching batch #{self.batch_count}: "
-                  f"{len(frames)} frames, audio={'yes' if text_part else 'no'}")
+                  f"{len(frames)} frames, audio={'yes' if audio_bytes else 'no'}")
 
             try:
-                self.gemini_client.send_frames(frames, text_prompt=text_part)
+                # Dispatch to Gemini with visuals + audio
+                self.gemini_client.send_frames(frames, text_prompt=None, audio_bytes=audio_bytes)
             except Exception as e:
                 traceback.print_exc()
                 if self.error_callback:
