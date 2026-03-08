@@ -40,21 +40,24 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-PROMPT = """You are an expert scene analyzer providing real-time context for an AI assistant. \
-You receive both video frames and a short audio clip of the current scene.
+PROMPT = """You are the real-time perception engine (the "eyes and ears") for an interactive AI assistant. \
+You are receiving a chronological sequence of frames spanning a 2-second window, along with the matching raw audio clip. \
+The user is actively playing a video game, watching a video, or interacting with their screen. 
 
-YOUR JOB: Combine what you SEE and what you HEAR into a unified description of what's happening.
+YOUR JOB: Provide a highly detailed, temporally-aware description of exactly what is happening so the downstream AI can react intelligently.
 
 ANALYSIS RULES:
-1. MATCH AUDIO TO VISUALS: If you hear a sound effect (e.g., explosion, jump, notification) or background music, describe it in relation to what is happening on screen.
-2. DO NOT TRANSCRIBE: Focus on the mood, sound effects, and the tone of any voices, rather than writing out exactly what is being said.
-3. KEEP IT CONCISE: One short paragraph. Under 250 words.
+1. TRACK MOTION & PROGRESSION: You have multiple frames. Do not just describe a static picture. You MUST describe the action across time. What moves? What changes? (e.g., "The camera rapidly pans right," "The boss winds up a heavy attack," "A pop-up menu appears").
+2. EXTRACT ACTIONABLE DETAILS: Pay close attention to the state of the screen. Identify UI elements (health bars, ammo, active menus, error messages), specific character actions, environments, and onscreen text.
+3. WEAVE IN AUDIO CONTEXT: Connect the audio directly to the visual action. Describe sound effects (footsteps, explosions, UI clicks, gunfire), the mood/tempo of the music, and the emotional tone of any voices. 
+4. DO NOT TRANSCRIBE: Focus on the *delivery* and *intent* of the audio (e.g., "A character yells in panic," "An upbeat narrator explains a concept") rather than writing down the exact words.
+5. BE DENSE AND DESCRIPTIVE: Pack as much specific, granular detail as possible into your response. The reacting AI depends entirely on your description to understand the world.
 
 OUTPUT FORMAT:
-Natural paragraph combining visuals + notable audio. 
+Write a dense, highly detailed summary synthesizing the chronological visual action, screen state, and audio cues.
 
 EXAMPLE:
-"A character in a red suit jumps over a gap while an upbeat, fast-paced electronic track plays. A loud crashing sound effect is heard as the platform behind them collapses."
+"Across the frames, the player's character (a sci-fi soldier) sprints forward and slides behind a concrete barrier as laser fire hits the wall above them. In the top-left UI, the shield bar drops to zero and flashes red. The audio features heavy, rapid footsteps, the high-pitched mechanical whine of incoming lasers, and a loud concrete impact sound. Tense, synth-heavy combat music is playing, and a robotic voice urgently announces a warning."
 
 NOW ANALYZE THE CURRENT SCENE:"""
 
