@@ -21,7 +21,7 @@ from streaming_manager import StreamingManager
 from websocket_server import WebSocketServer
 
 # Flush response buffer if it exceeds this many chars without hitting a sentence end
-_BUFFER_FLUSH_CHARS = 800
+_BUFFER_FLUSH_CHARS = 2000
 
 
 def log(msg: str):

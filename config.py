@@ -26,7 +26,7 @@ API_KEY = GEMINI_API_KEY
 VIDEO_DEVICE_INDEX = 1          # Set to None to use screen-region capture
 FPS                = 2
 IMAGE_QUALITY      = 85
-MAX_OUTPUT_TOKENS  = 600
+MAX_OUTPUT_TOKENS  = 1500
 
 CAPTURE_REGION = {
     "left": 14, "top": 154,
