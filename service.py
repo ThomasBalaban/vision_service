@@ -84,8 +84,6 @@ class VisionService:
         self.streaming_manager = StreamingManager(
             screen_capture  = self.screen_capture,
             gemini_client   = self.gemini_client,
-            target_fps      = FPS, 
-            batch_size      = int(FPS * 2.0),
             debug_mode      = DEBUG_MODE,
         )
         self.streaming_manager.set_error_callback(self._on_streaming_error)
@@ -213,15 +211,17 @@ class VisionService:
     # ── Gemini callbacks ──────────────────────────────────────────────────────
 
     def _on_gemini_response(self, text_chunk: str):
-        self._response_buffer += text_chunk
+        force_flush = False
+
+        # 1. Check if the stream just finished (our new fix!)
+        if text_chunk == "<END_OF_STREAM>":
+            force_flush = True
+        else:
+            self._response_buffer += text_chunk
 
         stripped = self._response_buffer.strip()
 
-        # Only flush on a genuine sentence boundary:
-        #   - plain end:             ...word.  ...word!  ...word?
-        #   - sentence inside quote: ..."word."  ..."word!"  ..."word?"
-        #   - newline
-        # A bare " mid-sentence (opening quote) no longer triggers a flush.
+        # 2. Normal sentence boundary checks
         at_sentence_end = (
             stripped.endswith((".", "!", "?"))
             or stripped.endswith(('."', '!"', '?"'))
@@ -229,7 +229,8 @@ class VisionService:
         )
         buffer_overflowed = len(self._response_buffer) > _BUFFER_FLUSH_CHARS
 
-        if not (at_sentence_end or buffer_overflowed):
+        # 3. Only proceed if we hit a boundary, an overflow, or the stream ended
+        if not (at_sentence_end or buffer_overflowed or force_flush):
             return
 
         final_text = stripped
@@ -237,11 +238,12 @@ class VisionService:
             self._response_buffer = ""
             return
 
+        # 4. Clear the buffer for the next sentence/request
         self._response_buffer = ""
         self._gemini_response_count += 1
         timestamp = datetime.now().isoformat()
 
-        if buffer_overflowed and not at_sentence_end:
+        if buffer_overflowed and not at_sentence_end and not force_flush:
             log(f"⚠️  Buffer force-flushed at {len(final_text)} chars (no sentence end found)")
 
         log(f"🤖 GEMINI RESPONSE #{self._gemini_response_count}: {repr(final_text[:120])}")

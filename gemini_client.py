@@ -129,6 +129,10 @@ class GeminiClient:
                 if chunk.text and self.response_callback:
                     self.response_callback(chunk.text)
 
+            # --- FIX: Send End Of Stream signal so the buffer flushes cleanly ---
+            if self.response_callback:
+                self.response_callback("<END_OF_STREAM>")
+
         except Exception as e:
             print(f"[Gemini] Error: {e}")
             if self.error_callback:
