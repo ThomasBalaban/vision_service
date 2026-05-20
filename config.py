@@ -4,6 +4,7 @@ Handles screen / camera capture → Gemini 2.5 Flash analysis.
 """
 import os
 import sys
+from pathlib import Path
 
 _THIS_DIR   = os.path.dirname(os.path.abspath(__file__))
 _PARENT_DIR = os.path.dirname(_THIS_DIR)
@@ -13,17 +14,37 @@ for _p in (_THIS_DIR, _PARENT_DIR):
 
 print(f"[config] sys.path[0:3] = {sys.path[:3]}", flush=True)
 
-try:
-    from api_keys import GEMINI_API_KEY
-    print("[config] ✅ api_keys (GEMINI_API_KEY) loaded", flush=True)
-except ImportError as e:
-    print(f"[config] ❌ api_keys FAILED: {e}", flush=True)
-    raise
 
-API_KEY = GEMINI_API_KEY
+def _load_sibling_secrets() -> None:
+    secrets_dir = Path(__file__).resolve().parent.parent / "director_ui" / "secrets"
+    if not secrets_dir.is_dir():
+        return
+    for path in sorted(secrets_dir.glob("*.env")):
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+if "GEMINI_API_KEY" not in os.environ:
+    _load_sibling_secrets()
+
+try:
+    API_KEY = os.environ["GEMINI_API_KEY"]
+except KeyError as e:
+    raise RuntimeError(
+        f"Missing required env var {e.args[0]}. "
+        "Credentials live in director_ui/secrets/*.env. Start this service via "
+        "the launcher, or export the variable manually."
+    ) from None
 
 # Vision
-VIDEO_DEVICE_INDEX = 1          # Set to None to use screen-region capture
+VIDEO_DEVICE_INDEX = 1          # Capture card (Cam Link 4K). Was previously 1, which
+                                # turned out to be a different camera and was the source
+                                # of months of "person at desk" hallucinations.
+                                # Set to None to use screen-region capture instead.
 FPS                = 2
 IMAGE_QUALITY      = 85
 MAX_OUTPUT_TOKENS  = 1500
