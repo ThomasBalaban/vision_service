@@ -9,6 +9,8 @@ picture + audio context from microphone_audio_service and stream_audio_service.
 
 WebSocket clients:  ws://localhost:8015
 Health check:       GET  http://localhost:8016/health
+List devices:       GET  http://localhost:8016/devices
+Set device:         POST http://localhost:8016/set-device  {"device_id": N}
 Shutdown:           POST http://localhost:8016/shutdown
 """
 
@@ -32,11 +34,20 @@ def _shutdown(*_):
     sys.exit(0)
 
 
+def _swap_device(device_id: int):
+    global _service
+    if _service:
+        _service.swap_device(device_id)
+
+
 def main():
     global _service
     _service = VisionService()
 
-    http_control.start(shutdown_callback=_shutdown)
+    http_control.start(
+        shutdown_callback   = _shutdown,
+        set_device_callback = _swap_device,
+    )
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)

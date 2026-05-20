@@ -115,6 +115,24 @@ class VisionService:
         except KeyboardInterrupt:
             self.stop()
 
+    def swap_device(self, device_id: int):
+        """Hot-swap the camera input. Mirrors mic/stream services."""
+        log(f"🔄 Device swap requested → device_id={device_id}")
+        try:
+            ok = self.screen_capture.swap_device(device_id)
+        except Exception as e:
+            log(f"❌ Device swap raised: {e}")
+            log(traceback.format_exc())
+            return
+
+        if not ok:
+            log(f"❌ Failed to open device {device_id}")
+            return
+
+        import config
+        config.VIDEO_DEVICE_INDEX = device_id
+        log(f"✅ Now capturing from device {device_id}")
+
     def stop(self):
         with self._shutdown_lock:
             if self._shutting_down:

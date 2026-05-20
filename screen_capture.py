@@ -81,3 +81,29 @@ class ScreenCapture:
     def release(self):
         if self.cap:
             self.cap.release()
+            self.cap = None
+
+    def swap_device(self, new_index: int) -> bool:
+        """Release the current capture (if any) and reopen on a new index.
+
+        Returns True if the new device opened cleanly. If it fails to open,
+        the old capture is gone — caller should treat the service as degraded
+        until the next swap or restart.
+        """
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+
+        print(f"[ScreenCapture] Swapping to camera index {new_index} …")
+        cap = cv2.VideoCapture(new_index)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        if not cap.isOpened():
+            print(f"[ScreenCapture] ⚠️  Could not open video device {new_index}")
+            cap.release()
+            return False
+
+        self.cap        = cap
+        self.video_index = new_index
+        self.sct         = None
+        return True

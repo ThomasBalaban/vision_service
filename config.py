@@ -41,10 +41,87 @@ except KeyError as e:
     ) from None
 
 # Vision
-VIDEO_DEVICE_INDEX = 1          # Capture card (Cam Link 4K). Was previously 1, which
-                                # turned out to be a different camera and was the source
-                                # of months of "person at desk" hallucinations.
-                                # Set to None to use screen-region capture instead.
+_PREFERRED_DEVICE_NAME = "Cam Link 4K"
+_FALLBACK_DEVICE_ID    = 0
+# Names containing any of these substrings are hidden from the picker and
+# skipped by the auto-detect lookup. cv2/AVFoundation will happily try to
+# connect to a Continuity Camera, which we never want.
+_DEVICE_NAME_BLOCKLIST = ("iphone",)
+
+
+def _enumerate_cameras() -> list[dict]:
+    """Snapshot real macOS cameras at startup with cv2-compatible indexes.
+
+    cv2.VideoCapture(N) on macOS enumerates AVFoundation devices sorted by
+    `uniqueID` ascending — NOT the order shown by ffmpeg's `-list_devices`
+    or by system_profiler's default output. Empirically:
+      Studio Display Camera (uniqueID 0x2114...) → cv2 idx 0
+      Cam Link 4K           (uniqueID 0x2132...) → cv2 idx 1
+      MacBook Pro Camera    (uniqueID 6C70...)   → cv2 idx 2
+      iPhone Camera         (uniqueID FD65...)   → cv2 idx 3
+
+    So we read all cameras from system_profiler (which exposes uniqueIDs),
+    sort by uniqueID, then assign positional ids that match cv2's indexing.
+    iPhone is filtered out AFTER assigning indexes so the remaining ids
+    still point at the correct cv2 indexes.
+    """
+    import json
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["system_profiler", "SPCameraDataType", "-json"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+        entries = json.loads(out).get("SPCameraDataType", [])
+    except Exception as e:
+        print(f"[config] ⚠️  system_profiler camera lookup failed: {e}", flush=True)
+        return []
+
+    # Sort by uniqueID to match cv2's AVFoundation enumeration order.
+    entries_sorted = sorted(
+        entries,
+        key=lambda e: str(e.get("spcamera_unique-id", "")).lower(),
+    )
+
+    devices: list[dict] = []
+    for cv2_idx, entry in enumerate(entries_sorted):
+        name = str(entry.get("_name", f"Camera {cv2_idx}"))
+        if any(blk in name.lower() for blk in _DEVICE_NAME_BLOCKLIST):
+            continue
+        devices.append({
+            "id":        cv2_idx,
+            "name":      name,
+            "unique_id": entry.get("spcamera_unique-id"),
+        })
+    return devices
+
+
+# Frozen snapshot of cameras taken at startup. We never re-enumerate at
+# request time because (a) system_profiler is slow and (b) the ordering can
+# drift when cv2 holds a camera, which corrupts the id mapping.
+VIDEO_DEVICES: list[dict] = _enumerate_cameras()
+for _d in VIDEO_DEVICES:
+    print(f"[config] camera id={_d['id']} name={_d['name']!r}", flush=True)
+
+
+def list_video_devices() -> list[dict]:
+    """Return the cached startup snapshot."""
+    return list(VIDEO_DEVICES)
+
+
+def _find_device_by_name(name: str) -> int | None:
+    for dev in VIDEO_DEVICES:
+        if name.lower() in dev["name"].lower():
+            print(f"[config] ✅ Found '{name}' → device_id={dev['id']} ({dev['name']})", flush=True)
+            return dev["id"]
+    return None
+
+
+_detected = _find_device_by_name(_PREFERRED_DEVICE_NAME)
+if _detected is None:
+    print(f"[config] ⚠️  '{_PREFERRED_DEVICE_NAME}' not found — falling back to device_id={_FALLBACK_DEVICE_ID}", flush=True)
+VIDEO_DEVICE_INDEX = _detected if _detected is not None else _FALLBACK_DEVICE_ID
+
 FPS                = 2
 IMAGE_QUALITY      = 85
 MAX_OUTPUT_TOKENS  = 1500
